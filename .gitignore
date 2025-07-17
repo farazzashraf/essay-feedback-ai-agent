@@ -2,7 +2,6 @@
 .dockerignore
 agent.py
 essay_feedback_scores.csv
-requirements.txt
 test.py
 venv
 app.log

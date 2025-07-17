@@ -1,0 +1,10 @@
+Flask
+Flask-Session
+redis
+python-dotenv
+pandas
+PyPDF2
+python-docx
+pyautogen
+chromadb
+sentence-transformers
