@@ -1,8 +1,6 @@
 .env
 .dockerignore
 agent.py
-docler-compose.yml
-dockerfile
 essay_feedback_scores.csv
 requirements.txt
 test.py
