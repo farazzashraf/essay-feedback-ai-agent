@@ -1,3 +1,5 @@
+groq
+
 # Core Flask dependencies
 Flask
 Flask-Session
