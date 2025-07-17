@@ -3,8 +3,8 @@ services:
     name: essay-feedback-app
     runtime: python
     plan: free
-    buildCommand: ""
-    startCommand: gunicorn wsgi:app
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn wsgi:app --bind 0.0.0.0:$PORT --workers 2 --timeout 300 --preload
     envVars:
       - key: FLASK_ENV
         value: production
