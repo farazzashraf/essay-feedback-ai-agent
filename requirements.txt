@@ -1,10 +1,37 @@
-Flask
-Flask-Session
-redis
-python-dotenv
-pandas
-PyPDF2
-python-docx
-pyautogen
-chromadb
-sentence-transformers
+# Core Flask dependencies
+Flask==2.3.3
+Flask-Session==0.5.0
+Werkzeug==2.3.7
+
+# Data processing
+pandas==2.0.3
+numpy==1.24.3
+
+# Document processing
+PyPDF2==3.0.1
+python-docx==0.8.11
+
+# AutoGen and AI
+pyautogen==0.2.25
+autogen-ext==0.4.0
+openai==1.3.8
+
+# Vector database and embeddings
+chromadb==0.4.18
+sentence-transformers==2.2.2
+
+# Redis for sessions
+redis==5.0.1
+
+# Environment and configuration
+python-dotenv==1.0.0
+
+# Logging and monitoring
+gunicorn==21.2.0
+
+# Additional utilities
+requests==2.31.0
+urllib3==2.0.7
+
+# Security
+cryptography==41.0.8
