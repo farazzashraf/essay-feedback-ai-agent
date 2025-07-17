@@ -7,16 +7,11 @@ from autogen.agentchat.contrib.retrieve_user_proxy_agent import RetrieveUserProx
 from dotenv import load_dotenv
 import PyPDF2
 from docx import Document
-import uuid
 import json
 import redis
 from flask_session import Session
 import logging
 from logging.handlers import RotatingFileHandler
-import pickle
-from autogen_ext.memory.chromadb import ChromaDBVectorMemory, PersistentChromaDBVectorMemoryConfig
-from pathlib import Path
-from autogen import ConversableAgent
 from werkzeug.middleware.proxy_fix import ProxyFix
 import sys
 from functools import wraps
