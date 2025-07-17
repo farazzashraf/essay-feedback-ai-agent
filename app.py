@@ -14,7 +14,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from werkzeug.middleware.proxy_fix import ProxyFix
 import sys
-from functools import wraps
+from functools import wraps 
 import time
 from urllib.parse import urlparse
 
@@ -644,7 +644,7 @@ def service_unavailable(error):
     """Handle service unavailable errors"""
     return jsonify({'error': 'Service temporarily unavailable. Please try again later.'}), 503
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    debug = os.environ.get('FLASK_ENV') != 'production'
-    app.run(host='0.0.0.0', port=port)
+# if __name__ == '__main__':
+#     port = int(os.environ.get('PORT', 5000))
+#     debug = os.environ.get('FLASK_ENV') != 'production'
+#     app.run(host='0.0.0.0', port=port)
