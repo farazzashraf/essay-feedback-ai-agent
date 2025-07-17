@@ -12,3 +12,5 @@ services:
         value: your_groq_api_key_here
       - key: SECRET_KEY
         generateValue: true
+      - key: REDIS_URL
+        value: rediss://default:<your-password>@<your-host>.redis.cloud:port
