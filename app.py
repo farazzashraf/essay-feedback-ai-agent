@@ -12,90 +12,174 @@ import json
 import redis
 from flask_session import Session
 import logging
+from logging.handlers import RotatingFileHandler
 import pickle
 from autogen_ext.memory.chromadb import ChromaDBVectorMemory, PersistentChromaDBVectorMemoryConfig
 from pathlib import Path
 from autogen import ConversableAgent
+from werkzeug.middleware.proxy_fix import ProxyFix
+import sys
+from functools import wraps
+import time
+from urllib.parse import urlparse
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
+# Load environment variables
 load_dotenv()
 
-app = Flask(__name__)
-app = Flask(__name__, static_folder='static', static_url_path='/static')
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secure-secret-key-here')
-app.config['SESSION_TYPE'] = 'redis'
-app.config['SESSION_PERMANENT'] = False
-app.config['SESSION_USE_SIGNER'] = True
-app.config['SESSION_KEY_PREFIX'] = 'essay_app:'
+# Configure logging for production
+def setup_logging(app):
+    """Setup production logging"""
+    if not app.debug and not app.testing:
+        # Create logs directory if it doesn't exist
+        if not os.path.exists('logs'):
+            os.mkdir('logs')
+        
+        # File handler for errors
+        file_handler = RotatingFileHandler('logs/essay_app.log', maxBytes=10240000, backupCount=10)
+        file_handler.setFormatter(logging.Formatter(
+            '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+        ))
+        file_handler.setLevel(logging.INFO)
+        app.logger.addHandler(file_handler)
+        
+        # Console handler
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(logging.Formatter(
+            '%(asctime)s %(levelname)s: %(message)s'
+        ))
+        console_handler.setLevel(logging.INFO)
+        app.logger.addHandler(console_handler)
+        
+        app.logger.setLevel(logging.INFO)
+        app.logger.info('Essay application startup')
 
-# Redis configuration with better error handling
-try:
-    redis_client = redis.Redis(
-        host=os.getenv('REDIS_HOST', 'localhost'),
-        port=int(os.getenv('REDIS_PORT', 6379)),
-        password=os.getenv('REDIS_PASSWORD', None),
-        decode_responses=False,  # Important: Set to False to handle binary data
-        socket_connect_timeout=30,
-        socket_timeout=30,
-        retry_on_timeout=True,
-        health_check_interval=30
-    )
+def create_app():
+    """Application factory pattern"""
+    app = Flask(__name__, static_folder='static', static_url_path='/static')
     
-    # Clear any corrupted session data
+    # Production configuration
+    app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', os.urandom(24))
+    app.config['SESSION_TYPE'] = 'redis'
+    app.config['SESSION_PERMANENT'] = False
+    app.config['SESSION_USE_SIGNER'] = True
+    app.config['SESSION_KEY_PREFIX'] = 'essay_app:'
+    app.config['SESSION_COOKIE_SECURE'] = os.getenv('FLASK_ENV') == 'production'
+    app.config['SESSION_COOKIE_HTTPONLY'] = True
+    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+    app.config['PERMANENT_SESSION_LIFETIME'] = 3600  # 1 hour
+    
+    # Trust proxy headers (important for Railway)
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+    
+    # Setup logging
+    setup_logging(app)
+    
+    # Redis configuration with Railway support
+    redis_url = os.getenv('REDIS_URL')
+    if redis_url:
+        # Parse Redis URL for Railway
+        parsed = urlparse(redis_url)
+        redis_config = {
+            'host': parsed.hostname,
+            'port': parsed.port,
+            'password': parsed.password,
+            'decode_responses': False,
+            'socket_connect_timeout': 30,
+            'socket_timeout': 30,
+            'retry_on_timeout': True,
+            'health_check_interval': 30
+        }
+        if parsed.scheme == 'rediss':
+            redis_config['ssl'] = True
+            redis_config['ssl_cert_reqs'] = None
+    else:
+        # Fallback configuration
+        redis_config = {
+            'host': os.getenv('REDIS_HOST', 'localhost'),
+            'port': int(os.getenv('REDIS_PORT', 6379)),
+            'password': os.getenv('REDIS_PASSWORD', None),
+            'decode_responses': False,
+            'socket_connect_timeout': 30,
+            'socket_timeout': 30,
+            'retry_on_timeout': True,
+            'health_check_interval': 30
+        }
+    
     try:
-        # Get all keys with the session prefix
-        pattern = f"{app.config['SESSION_KEY_PREFIX']}*"
-        keys = redis_client.keys(pattern)
-        # if keys:
-        #     logger.info(f"Found {len(keys)} existing session keys, clearing them...")
-        #     redis_client.delete(*keys)
-        #     logger.info("Cleared existing session data")
-        logger.info(f"Found {keys}")
+        redis_client = redis.Redis(**redis_config)
+        redis_client.ping()
+        app.config['SESSION_REDIS'] = redis_client
+        app.logger.info("Successfully connected to Redis")
     except Exception as e:
-        logger.warning(f"Could not clear existing sessions: {e}")
+        app.logger.error(f"Redis connection failed: {str(e)}")
+        app.logger.info("Falling back to filesystem sessions")
+        app.config['SESSION_TYPE'] = 'filesystem'
+        app.config['SESSION_FILE_DIR'] = tempfile.mkdtemp()
     
-    # Test Redis connection
-    redis_client.ping()
-    app.config['SESSION_REDIS'] = redis_client
-    logger.info("Successfully connected to Redis")
+    # Initialize Flask-Session
+    try:
+        Session(app)
+        app.logger.info("Flask-Session initialized successfully")
+    except Exception as e:
+        app.logger.error(f"Error initializing Flask-Session: {str(e)}")
+        raise
     
-except redis.ConnectionError as e:
-    logger.error(f"Failed to connect to Redis: {str(e)}")
-    # Fallback to filesystem sessions
-    logger.info("Falling back to filesystem sessions")
-    app.config['SESSION_TYPE'] = 'filesystem'
-    app.config['SESSION_FILE_DIR'] = tempfile.mkdtemp()
-    
-except Exception as e:
-    logger.error(f"Redis setup error: {str(e)}")
-    # Fallback to filesystem sessions
-    logger.info("Falling back to filesystem sessions")
-    app.config['SESSION_TYPE'] = 'filesystem'
-    app.config['SESSION_FILE_DIR'] = tempfile.mkdtemp()
+    return app
 
-# Initialize Flask-Session with error handling
-try:
-    Session(app)
-    logger.info("Flask-Session initialized successfully")
-except Exception as e:
-    logger.error(f"Error initializing Flask-Session: {str(e)}", exc_info=True)
-    # Try to reinitialize with filesystem sessions
-    app.config['SESSION_TYPE'] = 'filesystem'
-    app.config['SESSION_FILE_DIR'] = tempfile.mkdtemp()
-    Session(app)
-    logger.info("Flask-Session initialized with filesystem fallback")
+# Create app instance
+app = create_app()
+logger = app.logger
 
+# Environment validation
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
+    logger.error("GROQ_API_KEY not found in environment variables")
     raise ValueError("GROQ_API_KEY not found in environment. Set it before running.")
 
+# Rate limiting decorator
+def rate_limit(max_requests=10, window=60):
+    """Simple rate limiting decorator"""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            # Simple in-memory rate limiting (use Redis for production scaling)
+            client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
+            current_time = time.time()
+            
+            # This is a simplified rate limiter - in production, use Redis
+            if not hasattr(app, 'rate_limit_storage'):
+                app.rate_limit_storage = {}
+            
+            if client_ip in app.rate_limit_storage:
+                requests = app.rate_limit_storage[client_ip]
+                # Clean old requests
+                requests = [req_time for req_time in requests if current_time - req_time < window]
+                
+                if len(requests) >= max_requests:
+                    return jsonify({'error': 'Rate limit exceeded. Please try again later.'}), 429
+                
+                requests.append(current_time)
+                app.rate_limit_storage[client_ip] = requests
+            else:
+                app.rate_limit_storage[client_ip] = [current_time]
+            
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
 def process_csv_to_documents():
+    """Process CSV file to create document embeddings"""
     temp_dir = tempfile.mkdtemp()
     try:
-        df = pd.read_csv('essay_feedback_scores.csv')
+        # Check if CSV file exists
+        csv_path = 'essay_feedback_scores.csv'
+        if not os.path.exists(csv_path):
+            logger.error(f"CSV file not found: {csv_path}")
+            raise FileNotFoundError(f"CSV file '{csv_path}' not found.")
+        
+        df = pd.read_csv(csv_path)
+        logger.info(f"Processing {len(df)} rows from CSV file")
+        
         for index, row in df.iterrows():
             filename = f"feedback_{int(float(str(index))) + 1}.txt"
             file_path = os.path.join(temp_dir, filename)
@@ -110,13 +194,25 @@ Score: {row['score']}/10
             """
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(document_content.strip())
+        
+        logger.info(f"Successfully processed {len(df)} documents")
         return temp_dir, len(df)
-    except FileNotFoundError:
-        raise FileNotFoundError("CSV file 'essay_feedback_scores.csv' not found.")
+    
+    except FileNotFoundError as e:
+        logger.error(f"CSV file not found: {str(e)}")
+        raise
     except Exception as e:
+        logger.error(f"Error processing CSV file: {str(e)}")
         raise Exception(f"Error processing CSV file: {str(e)}")
 
-docs_path, num_documents = process_csv_to_documents()
+# Initialize document processing
+try:
+    docs_path, num_documents = process_csv_to_documents()
+    logger.info(f"Documents initialized successfully: {num_documents} documents")
+except Exception as e:
+    logger.error(f"Failed to initialize documents: {str(e)}")
+    docs_path = None
+    num_documents = 0
 
 def create_chat_agent():
     """Create a specialized chat agent for conversational interactions"""
@@ -125,15 +221,6 @@ def create_chat_agent():
         "api_key": GROQ_API_KEY,
         "api_type": "groq"
     }]
-    
-    # rag_memory = ChromaDBVectorMemory(
-    #     config=PersistentChromaDBVectorMemoryConfig(
-    #         collection_name="autogen_docs",
-    #         persistence_path=os.path.join(str(Path.home()), ".chromadb_autogen"),
-    #         k=3,  # Return top 3 results
-    #         score_threshold=0.3,  # Minimum similarity score
-    #     )
-    # )
     
     chat_agent = AssistantAgent(
         name="essay_chat_assistant",
@@ -158,7 +245,6 @@ Guidelines:
 
 Remember: You're having a conversation, not writing a formal analysis. Be natural, helpful, and engaging.""",
         llm_config={"config_list": config_list, "temperature": 0.5},
-        # memory=[rag_memory]
     )
     
     return chat_agent
@@ -180,35 +266,64 @@ def safe_session_set(key, value):
         logger.warning(f"Error setting session key {key}: {e}")
         return False
 
+# Health check endpoint
+@app.route('/health')
+def health_check():
+    """Health check endpoint for Railway"""
+    try:
+        # Check Redis connection if configured
+        if app.config.get('SESSION_REDIS'):
+            app.config['SESSION_REDIS'].ping()
+        
+        # Check if documents are loaded
+        if docs_path is None:
+            return jsonify({'status': 'unhealthy', 'error': 'Documents not loaded'}), 503
+        
+        return jsonify({
+            'status': 'healthy',
+            'documents_loaded': num_documents,
+            'session_type': app.config.get('SESSION_TYPE'),
+            'timestamp': time.time()
+        })
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return jsonify({'status': 'unhealthy', 'error': str(e)}), 503
+
 @app.route('/')
 def index():
-    # Initialize session variables if not present
+    """Main page route"""
     try:
+        # Initialize session variables if not present
         if 'chat_history' not in session:
             session['chat_history'] = []
         if 'current_essay' not in session:
             session['current_essay'] = ''
         if 'current_feedback' not in session:
             session['current_feedback'] = ''
-        if 'essay_history' not in session:  
-            session['essay_history'] = []   
+        if 'essay_history' not in session:
+            session['essay_history'] = []
             
+        return render_template('index.html')
+    
     except Exception as e:
-        logger.warning(f"Error initializing session: {e}")
+        logger.error(f"Error in index route: {str(e)}")
         # Clear session and try again
         session.clear()
         session['chat_history'] = []
         session['current_essay'] = ''
         session['current_feedback'] = ''
-        session['essay_history'] = []  # [NEW]
-    
-    return render_template('index.html')
+        session['essay_history'] = []
+        return render_template('index.html')
 
 @app.route('/submit_essay', methods=['POST'])
+@rate_limit(max_requests=5, window=300)  # 5 requests per 5 minutes
 def submit_essay():
+    """Submit essay for analysis"""
     try:
+        if docs_path is None:
+            return jsonify({'error': 'Service temporarily unavailable. Please try again later.'}), 503
+        
         user_essay = ""
-        error_message = ""
         
         # Handle pasted essay or uploaded file
         input_method = request.form.get('input_method')
@@ -216,11 +331,17 @@ def submit_essay():
             user_essay = request.form.get('essay_text', '').strip()
         else:
             uploaded_file = request.files.get('essay_file')
-            if uploaded_file:
-                if uploaded_file and uploaded_file.filename:
-                    file_ext = uploaded_file.filename.split('.')[-1].lower()
-                else:
-                    return jsonify({'error': 'No file uploaded or invalid file.'})
+            if uploaded_file and uploaded_file.filename:
+                file_ext = uploaded_file.filename.split('.')[-1].lower()
+                
+                # File size check (limit to 10MB)
+                uploaded_file.seek(0, 2)  # Seek to end
+                file_size = uploaded_file.tell()
+                uploaded_file.seek(0)  # Reset to beginning
+                
+                if file_size > 10 * 1024 * 1024:  # 10MB limit
+                    return jsonify({'error': 'File too large. Maximum size is 10MB.'})
+                
                 try:
                     if file_ext in ['txt', 'tex']:
                         user_essay = uploaded_file.read().decode('utf-8')
@@ -235,6 +356,7 @@ def submit_essay():
                     else:
                         return jsonify({'error': 'Unsupported file format. Please upload a .txt, .pdf, .docx, or .tex file.'})
                 except Exception as e:
+                    logger.error(f"Error reading uploaded file: {str(e)}")
                     return jsonify({'error': f'Error reading uploaded file: {str(e)}'})
             else:
                 return jsonify({'error': 'No file uploaded.'})
@@ -242,13 +364,17 @@ def submit_essay():
         if not user_essay:
             return jsonify({'error': 'Please provide an essay by pasting text or uploading a file.'})
 
+        # Word count check
+        word_count = len(user_essay.split())
+        if word_count > 5000:
+            return jsonify({'error': 'Essay too long. Maximum 5000 words allowed.'})
+
         # Configure agents
         config_list = [{
             "model": "llama-3.3-70b-versatile",
             "api_key": GROQ_API_KEY,
             "api_type": "groq"
         }]
-        
 
         assistant = AssistantAgent(
             name="writing_teacher",
@@ -351,15 +477,13 @@ If the essay is not valid, provide only the validation result and correction sug
                     break
 
         if feedback and feedback.strip():
-            # Store in session for chat context with error handling
+            # Store in session for chat context
             safe_session_set('current_essay', user_essay)
             safe_session_set('current_feedback', feedback)
-            # safe_session_set('chat_history', [])  # Reset chat history for new essay
             
             reset_chat = request.form.get('reset_chat') == 'true'
             if reset_chat:
                 safe_session_set('chat_history', [])
-
             
             # Save to essay history
             essay_history = safe_session_get('essay_history', [])
@@ -369,9 +493,9 @@ If the essay is not valid, provide only the validation result and correction sug
                 'essay': user_essay,
                 'feedback': feedback
             })
-            
             safe_session_set('essay_history', essay_history)
             
+            logger.info(f"Essay submitted successfully. Word count: {word_count}")
             return jsonify({
                 'success': True,
                 'feedback': feedback
@@ -381,23 +505,33 @@ If the essay is not valid, provide only the validation result and correction sug
 
     except Exception as e:
         logger.error(f"Error in submit_essay: {str(e)}", exc_info=True)
-        return jsonify({'error': f'Error generating feedback: {str(e)}'})
+        return jsonify({'error': 'Error generating feedback. Please try again later.'}), 500
 
 @app.route('/chat', methods=['POST'])
+@rate_limit(max_requests=20, window=300)  # 20 requests per 5 minutes
 def chat():
+    """Chat endpoint for conversational interaction"""
     try:
+        if docs_path is None:
+            return jsonify({'error': 'Service temporarily unavailable. Please try again later.'}), 503
+        
         data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid request format'}), 400
+        
         user_message = data.get('message', '').strip()
         
         if not user_message:
             return jsonify({'error': 'No message provided'})
         
-        # Get context from session with safe access
+        if len(user_message) > 1000:
+            return jsonify({'error': 'Message too long. Maximum 1000 characters allowed.'})
+        
+        # Get context from session
         current_essay = safe_session_get('current_essay', '')
         current_feedback = safe_session_get('current_feedback', '')
         chat_history = safe_session_get('chat_history', [])
-        essay_history = safe_session_get('essay_history', [])  # [NEW]
-        
+        essay_history = safe_session_get('essay_history', [])
         
         if not current_essay or not current_feedback:
             return jsonify({'error': 'Please submit an essay first to start chatting'})
@@ -408,25 +542,19 @@ def chat():
         # Build conversation context
         conversation_context = f"""
 CONTEXT:
-Student's Essay: {current_essay}  # Truncated for context
+Student's Essay: {current_essay[:500]}...  # Truncated for context
 
 Current Feedback Provided: {current_feedback}
 
-Previous Essay History: {essay_history}
+Previous Essay History: {essay_history[-3:] if essay_history else []}  # Last 3 essays
 
-Chat History: {chat_history}
+Chat History: {chat_history[-10:] if chat_history else []}  # Last 10 messages
 """
-        
-        # Add recent chat history (last 10 messages to keep context manageable)
-        chat_history = chat_history or []  # Ensure chat_history is a list
-        recent_history = chat_history[-10:] if len(chat_history) > 10 else chat_history
-        for msg in recent_history:
-            conversation_context += f"{msg['role'].upper()}: {msg['content']}\n"
         
         # Add current user message
         conversation_context += f"\nSTUDENT: {user_message}\n\nPlease respond as the writing tutor, considering the essay, feedback, and conversation history above."
         
-        # Create a simple proxy agent for context
+        # Create proxy agent
         config_list = [{
             "model": "llama-3.3-70b-versatile",
             "api_key": GROQ_API_KEY,
@@ -475,9 +603,15 @@ Chat History: {chat_history}
         if not ai_response:
             ai_response = "I apologize, but I'm having trouble generating a response. Could you please try rephrasing your question?"
         
-        # Update chat history with safe session handling
+        # Update chat history
+        chat_history = chat_history or []
         chat_history.append({'role': 'user', 'content': user_message})
         chat_history.append({'role': 'assistant', 'content': ai_response})
+        
+        # Keep only last 20 messages to prevent session bloat
+        if len(chat_history) > 20:
+            chat_history = chat_history[-20:]
+        
         safe_session_set('chat_history', chat_history)
         
         return jsonify({
@@ -487,7 +621,7 @@ Chat History: {chat_history}
         
     except Exception as e:
         logger.error(f"Error in chat: {str(e)}", exc_info=True)
-        return jsonify({'error': f'Error in chat: {str(e)}'})
+        return jsonify({'error': 'Error in chat. Please try again later.'}), 500
 
 @app.route('/clear_chat', methods=['POST'])
 def clear_chat():
@@ -497,13 +631,25 @@ def clear_chat():
         return jsonify({'success': True})
     except Exception as e:
         logger.error(f"Error clearing chat: {str(e)}")
-        return jsonify({'error': f'Error clearing chat: {str(e)}'})
+        return jsonify({'error': 'Error clearing chat. Please try again.'}), 500
+
+@app.errorhandler(404)
+def not_found(error):
+    """Handle 404 errors"""
+    return jsonify({'error': 'Resource not found'}), 404
 
 @app.errorhandler(500)
 def internal_error(error):
     """Handle internal server errors"""
     logger.error(f"Internal server error: {str(error)}", exc_info=True)
-    return jsonify({'error': 'Internal server error. Please try again.'}), 500
+    return jsonify({'error': 'Internal server error. Please try again later.'}), 500
+
+@app.errorhandler(503)
+def service_unavailable(error):
+    """Handle service unavailable errors"""
+    return jsonify({'error': 'Service temporarily unavailable. Please try again later.'}), 503
 
 if __name__ == '__main__':
-    app.run()
+    port = int(os.environ.get('PORT', 5000))
+    debug = os.environ.get('FLASK_ENV') != 'production'
+    app.run(host='0.0.0.0', port=port)
