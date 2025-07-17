@@ -166,14 +166,35 @@ def process_csv_to_documents():
     """Process CSV file to create document embeddings"""
     temp_dir = tempfile.mkdtemp()
     try:
-        # Check if CSV file exists
-        csv_path = 'essay_feedback_scores.csv'
-        if not os.path.exists(csv_path):
-            logger.error(f"CSV file not found: {csv_path}")
-            raise FileNotFoundError(f"CSV file '{csv_path}' not found.")
+        # Try multiple possible locations for the CSV file
+        possible_paths = [
+            'essay_feedback_scores.csv',  # Root directory
+            os.path.join(os.path.dirname(__file__), 'essay_feedback_scores.csv'),  # Same directory as script
+            os.path.join('data', 'essay_feedback_scores.csv'),  # Data folder
+            os.path.join('static', 'essay_feedback_scores.csv'),  # Static folder
+        ]
+        
+        csv_path = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                csv_path = path
+                logger.info(f"Found CSV file at: {csv_path}")
+                break
+        
+        if csv_path is None:
+            # List contents of current directory for debugging
+            current_dir_contents = os.listdir('.')
+            logger.error(f"CSV file not found in any location. Current directory contents: {current_dir_contents}")
+            raise FileNotFoundError("CSV file 'essay_feedback_scores.csv' not found in any expected location.")
         
         df = pd.read_csv(csv_path)
-        logger.info(f"Processing {len(df)} rows from CSV file")
+        logger.info(f"Processing {len(df)} rows from CSV file: {csv_path}")
+        
+        # Validate CSV structure
+        required_columns = ['essay_topic', 'essay_content', 'feedback', 'score']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            raise ValueError(f"CSV file is missing required columns: {missing_columns}")
         
         for index, row in df.iterrows():
             filename = f"feedback_{int(float(str(index))) + 1}.txt"
@@ -190,11 +211,14 @@ Score: {row['score']}/10
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(document_content.strip())
         
-        logger.info(f"Successfully processed {len(df)} documents")
+        logger.info(f"Successfully processed {len(df)} documents from {csv_path}")
         return temp_dir, len(df)
     
     except FileNotFoundError as e:
         logger.error(f"CSV file not found: {str(e)}")
+        raise
+    except ValueError as e:
+        logger.error(f"CSV validation error: {str(e)}")
         raise
     except Exception as e:
         logger.error(f"Error processing CSV file: {str(e)}")
@@ -316,26 +340,31 @@ def submit_essay():
     """Submit essay for analysis"""
     try:
         if docs_path is None:
+            logger.error("Documents path not initialized")
             return jsonify({'error': 'Service temporarily unavailable. Please try again later.'}), 503
         
         user_essay = ""
         
         # Handle pasted essay or uploaded file
         input_method = request.form.get('input_method')
+        logger.info(f"Received submit_essay request with input_method: {input_method}")
+        
         if input_method == "paste":
             user_essay = request.form.get('essay_text', '').strip()
+            logger.info(f"Pasted essay length: {len(user_essay)} characters")
         else:
             uploaded_file = request.files.get('essay_file')
             if uploaded_file and uploaded_file.filename:
                 file_ext = uploaded_file.filename.split('.')[-1].lower()
-                
+                logger.info(f"Uploaded file: {uploaded_file.filename}, extension: {file_ext}")
                 # File size check (limit to 10MB)
                 uploaded_file.seek(0, 2)  # Seek to end
                 file_size = uploaded_file.tell()
                 uploaded_file.seek(0)  # Reset to beginning
                 
-                if file_size > 10 * 1024 * 1024:  # 10MB limit
-                    return jsonify({'error': 'File too large. Maximum size is 10MB.'})
+                if file_size > 10 * 1024 * 1024:
+                    logger.warning(f"File too large: {uploaded_file.filename}, size: {file_size}")
+                    return jsonify({'error': 'File too large. Maximum size is 10MB.'}), 400
                 
                 try:
                     if file_ext in ['txt', 'tex']:
