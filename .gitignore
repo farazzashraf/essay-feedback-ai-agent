@@ -1,6 +1,5 @@
 .env
 .dockerignore
 agent.py
-essay_feedback_scores.csv
 venv
 app.log
