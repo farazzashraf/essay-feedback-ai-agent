@@ -11,6 +11,7 @@ numpy
 PyPDF2
 python-docx
 # AutoGen and AI
+autogen
 pyautogen
 autogen-ext
 openai
